@@ -1,0 +1,9 @@
+{application, leveldb_manager,
+ [
+  {description, "Minimal application to start leveldb_manager_sup"},
+  {vsn, "1.0"},
+  {registered, [leveldb_manager_sup]},
+  {applications, [kernel, stdlib]},
+  {mod, {leveldb_manager_app, []}},
+  {env, []}
+ ]}.
