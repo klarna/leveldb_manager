@@ -30,9 +30,6 @@
 %% private entry points (supervisor callbacks)
 -export([init/1]).
 
-%% obsolete, remove when all nodes have been restarted
--export([ets_owner/0]).
-
 %%%----------------------------------------------------------------
 
 start_link() ->
@@ -46,16 +43,6 @@ init([]) ->
          , 5000
          , worker
          , [leveldb_manager]}]}}.
-
-%% This code must remain until all nodes have been restarted and
-%% no process is executing in it.  Crashing an ets_owner process
-%% destroys the leveldb manager states it owns, crashes the supervisor,
-%% and kills the application.
-ets_owner() ->
-  %% We want this to block until any message arrives or five
-  %% minutes have passed, whichever occurs first.
-  receive _ -> ok after 5*60*1000 -> ok end,
-  ?MODULE:ets_owner().
 
 start_manager(Name, Path, Options) ->
   %% Clients call leveldb_manager:open/3 to create leveldb instances.
