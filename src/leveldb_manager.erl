@@ -83,7 +83,6 @@
         , close/1]).
 
 %% private entry point (supervisor callback)
--export([ start_link/4]). % obsolete, upgrade compat
 -export([ start_link/3]).
 
 %% private entry points (gen_server callbacks)
@@ -147,9 +146,6 @@ default_options() ->
 open(Name, Path, Options) ->
   {ok, _Pid} = leveldb_manager_sup:start_manager(Name, Path, Options),
   {ok, Name}.
-
-start_link(_EtsOwner, Name, Path, Options) -> % obsolete, upgrade compat
-  start_link(Name, Path, Options).
 
 start_link(Name, Path, Options) ->
   %% Note: this function executes in the context of the supervisor,
