@@ -93,8 +93,6 @@
         , terminate/2
         , code_change/3]).
 
--include_lib("log_and_alarm/include/alarm.hrl").
-
 %%%----------------------------------------------------------------
 
 get(Mgr, Key, Opts) ->
@@ -341,10 +339,9 @@ handle_read_unlock({RPid, _Unique}, State) ->
     {RPid, MonRef} ->
       {reply, ok, do_read_unlock(RPid, MonRef, State)};
     false ->
-      alarm:alarm(?alarm_error, tech,
-                  "Leveldb read-unlock without holding read lock",
-                  "Leveldb read-unlock without holding read lock: ~p",
-                  [RPid]),
+      error_logger:error_msg(
+        "Leveldb read-unlock without holding read lock: ~p",
+        [RPid]),
       {reply, {error, nolock}, State}
   end.
 
@@ -387,10 +384,9 @@ handle_write_unlock({WPid, _Unique}, State) ->
     {{WPid, _Unique2}, MonRef} ->
       {reply, ok, do_write_unlock(MonRef, State)};
     _ ->
-      alarm:alarm(?alarm_error, tech,
-                  "Leveldb write-unlock without holding write lock",
-                  "Leveldb write-unlock without holding write lock: ~p",
-                  [WPid]),
+      error_logger:error_msg(
+        "Leveldb write-unlock without holding write lock: ~p",
+        [WPid]),
       {reply, {error, nolock}, State}
   end.
 
