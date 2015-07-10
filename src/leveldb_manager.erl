@@ -172,7 +172,7 @@ get_all() ->
     try supervisor:which_children(leveldb_manager_sup)
     catch exit:{noproc, _} -> [] end,
   lists:map(fun({undefined, Pid, worker, [?MODULE]}) -> Pid end,
-	    Children).
+            Children).
 
 get_path(Mgr) ->
   robust_call(Mgr, get_path).
@@ -259,9 +259,9 @@ init([StateIsOld, State0, Path, Options]) ->
   State =
     case StateIsOld of
       true ->
-	restart(State0);
+        restart(State0);
       false ->
-	leveldb_online(state_init(State0, Path, Options))
+        leveldb_online(state_init(State0, Path, Options))
     end,
   {ok, State}.
 
