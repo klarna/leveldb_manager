@@ -213,18 +213,25 @@ robust_call(Mgr, Req, Retries) ->
 
 %%%----------------------------------------------------------------
 
+-define(nr_static_keys, 5).
+%% Number of static keys stored in the ETS table. The static keys must
+%% always be present in the table. On top of them the table will also
+%% contain each read lock holder process' pid as a key.
+%%
+%% By knowing the number of static keys the number of held read locks
+%% can be cheaply calculated from the size of the ETS table.
+
 state_init(Name, Path, Options) ->
   Handle = [],
-  Readers = [],
   Pending = [],
   Writer = [],
   ets:insert(Name,
              [ {path, Path}             % path to leveldb instance
              , {options, Options}       % leveldb open options
              , {handle, Handle}         % leveldb handle if online, [] otherwise
-             , {readers, Readers}       % {Pid,MonRef} list of active readers
              , {pending, Pending}       % From list of pending readers
              , {writer, Writer}]),      % {From,MonRef} of writer, [] otherwise
+  ?nr_static_keys = ets:info(Name, size),       % assert
   Name.
 
 state_new(Name) ->
@@ -252,18 +259,33 @@ state(Name) ->
 state_delete(Name) ->
   ets:delete(Name).
 
-state_get_readers(Name) -> ets:lookup_element(Name, readers, 2).
+state_get_readers(Name) ->
+  ets:select(Name, [{ _MatchHead = {'$1', '$2'}
+                    , _Guards    = [{is_pid, '$1'}]
+                    , _Result    = ['$_']
+                    }]).
 state_get_pending(Name) -> ets:lookup_element(Name, pending, 2).
 state_get_options(Name) -> ets:lookup_element(Name, options, 2).
 state_get_writer(Name) -> ets:lookup_element(Name, writer, 2).
 state_get_handle(Name) -> ets:lookup_element(Name, handle, 2).
 state_get_path(Name) -> ets:lookup_element(Name, path, 2).
 
-state_set_readers(Name, Readers) -> ets:insert(Name, {readers, Readers}), Name.
 state_set_pending(Name, Pending) -> ets:insert(Name, {pending, Pending}), Name.
 state_set_writer(Name, Writer) -> ets:insert(Name, {writer, Writer}), Name.
 state_set_handle(Name, Handle) -> ets:insert(Name, {handle, Handle}), Name.
 state_set_path(Name, Path) -> ets:insert(Name, {path, Path}), Name.
+
+state_add_reader(Name, Reader) -> ets:insert(Name, Reader), Name.
+state_try_remove_reader(Name, RPid) ->
+  case ets:lookup(Name, RPid) of
+    [{RPid, MonRef}] ->
+      ets:delete(Name, RPid),
+      {ok, MonRef, Name};
+    [] ->
+      false
+  end.
+state_has_readers(Name) ->
+  ets:info(Name, size) > ?nr_static_keys.
 
 %%%----------------------------------------------------------------
 
@@ -289,9 +311,9 @@ repair_writer(State) ->
   end.
 
 repair_readers(State) ->
-  state_set_readers(
-    State,
-    lists:map(fun remonitor/1, state_get_readers(State))).
+  lists:foldl(fun (Reader, S) -> state_add_reader(S, remonitor(Reader)) end,
+              State,
+              state_get_readers(State)).
 
 remonitor({Pid, _MonRef}) ->
   {Pid, erlang:monitor(process, Pid)}.
@@ -338,42 +360,39 @@ code_change(_OldVsn, State, _Extra) ->
 handle_read_lock(RFrom = {RPid, _Unique}, State) ->
   case state_get_writer(State) of
     [] -> % no active or pending writer: take it
-      MonRef = erlang:monitor(process, RPid),
-      Readers = [{RPid, MonRef} | state_get_readers(State)],
-      {reply, state_get_handle(State), state_set_readers(State, Readers)};
+      Reader = {RPid, erlang:monitor(process, RPid)},
+      {reply, state_get_handle(State), state_add_reader(State, Reader)};
     _ -> % an active or pending writer: wait for it to leave
       Pending = [RFrom | state_get_pending(State)],
       {noreply, state_set_pending(State, Pending)}
   end.
 
-handle_read_unlock({RPid, _Unique}, State) ->
-  case lists:keyfind(RPid, 1, state_get_readers(State)) of
-    {RPid, MonRef} ->
-      {reply, ok, do_read_unlock(RPid, MonRef, State)};
+handle_read_unlock({RPid, _Unique}, State0) ->
+  case state_try_remove_reader(State0, RPid) of
+    {ok, MonRef, State1} ->
+      {reply, ok, do_read_unlock(MonRef, State1)};
     false ->
       error_logger:error_msg(
         "Leveldb read-unlock without holding read lock: ~p",
         [RPid]),
-      {reply, {error, nolock}, State}
+      {reply, {error, nolock}, State0}
   end.
 
-do_read_unlock(RPid, MonRef, State0) ->
+do_read_unlock(MonRef, State0) ->
   erlang:demonitor(MonRef, [flush]),
-  Readers = lists:keydelete(RPid, 1, state_get_readers(State0)),
-  State1 = state_set_readers(State0, Readers),
-  case Readers of
-    [] -> % no active readers: check for pending writer
-      case state_get_writer(State1) of
+  case state_has_readers(State0) of
+    false -> % no active readers: check for pending writer
+      case state_get_writer(State0) of
         {WFrom, _MonRef} -> % pending writer: wake it
           %% take the write lock, then wake the writer
-          State2 = leveldb_offline(State1),
+          State1 = leveldb_offline(State0),
           gen_server:reply(WFrom, ok),
-          State2;
+          State1;
         [] -> % no pending writer: nothing to do
-          State1
+          State0
       end;
-    _ -> % more active readers: nothing to do
-      State1
+    true -> % more active readers: nothing to do
+      State0
   end.
 
 handle_write_lock(WFrom = {WPid, _Unique}, State0) ->
@@ -381,10 +400,10 @@ handle_write_lock(WFrom = {WPid, _Unique}, State0) ->
     [] -> % no active or pending writer
       MonRef = erlang:monitor(process, WPid),
       State1 = state_set_writer(State0, {WFrom, MonRef}),
-      case state_get_readers(State1) of
-        [] -> % no active readers: take it
+      case state_has_readers(State1) of
+        false -> % no active readers: take it
           {reply, ok, leveldb_offline(State1)};
-        _ ->  % more active readers: wait for them to leave
+        true ->  % more active readers: wait for them to leave
           {noreply, State1}
       end;
     _ -> % an active or pending writer: fail
@@ -428,17 +447,17 @@ handle_set_path(State, Path) ->
 handle_stop(State) ->
   {stop, normal, ok, State}.
 
-handle_down(Pid, State) ->
+handle_down(Pid, State0) ->
   NewState =
-    case state_get_writer(State) of
+    case state_get_writer(State0) of
       {{Pid, _Unique}, MonRef} ->
-        do_write_unlock(MonRef, State);
+        do_write_unlock(MonRef, State0);
       _ ->
-        case lists:keyfind(Pid, 1, state_get_readers(State)) of
-          {Pid, MonRef} ->
-            do_read_unlock(Pid, MonRef, State);
+        case state_try_remove_reader(State0, Pid) of
+          {ok, MonRef, State1} ->
+            do_read_unlock(MonRef, State1);
           false ->
-            State
+            State0
         end
     end,
   {noreply, NewState}.
