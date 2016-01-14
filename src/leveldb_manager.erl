@@ -63,18 +63,20 @@
 -behaviour(gen_server).
 
 %% leveldb wrappers ensuring correct lock/op/unlock sequences
--export([ get/3
+-export([ open/2
+        , get/3
         , put/4
         , delete/3
         , write/3
         , iterator/2
         , iterator/3
         , iterator_move/2
-        , iterator_close/1]).
+        , iterator_close/1
+        , destroy/2]).
 
 %% public entry points
--export([ open/2
-        , open/3
+-export([ start/2
+        , start/3
         , suspend_before_snapshot/1
         , resume_after_snapshot/1
         , get_all/0
@@ -94,6 +96,10 @@
         , code_change/3]).
 
 %%%----------------------------------------------------------------
+
+open(Path, Options) ->
+  Name = list_to_atom(filename:basename(Path)),
+  start(Name, Path, Options).
 
 get(Mgr, Key, Opts) ->
   Val = eleveldb:get(get_handle(Mgr), Key, Opts),
@@ -133,17 +139,23 @@ iterator_close({Mgr, IRef}) ->
   put_handle(Mgr),
   Val.
 
+destroy(Path, Opts) ->
+  %% this wrapper is only needed to cover the entire eleveldb API used
+  %% from klarna_leveldb; there's no need to modify eleveldb semantics
+  %% for destroy
+  eleveldb:destroy(Path, Opts).
+
 %%%----------------------------------------------------------------
 
-open(Name, Path) ->
-  open(Name, Path, default_options()).
+start(Name, Path) ->
+  start(Name, Path, default_options()).
+
+start(Name, Path, Options) ->
+  {ok, _Pid} = leveldb_manager_sup:start_manager(Name, Path, Options),
+  {ok, Name}.
 
 default_options() ->
   [{create_if_missing, true}].
-
-open(Name, Path, Options) ->
-  {ok, _Pid} = leveldb_manager_sup:start_manager(Name, Path, Options),
-  {ok, Name}.
 
 start_link(Name, Path, Options) ->
   %% Note: this function executes in the context of the supervisor,

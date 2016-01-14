@@ -45,9 +45,9 @@ init([]) ->
          , [leveldb_manager]}]}}.
 
 start_manager(Name, Path, Options) ->
-  %% Clients call leveldb_manager:open/3 to create leveldb instances.
+  %% Clients call leveldb_manager:start/3 to create leveldb instances.
   %% That in turn calls this function, which uses the supervisor framework
-  %% to call leveldb_manager:start_link/4 (see init/1 above) to create
+  %% to call leveldb_manager:start_link/3 (see init/1 above) to create
   %% a new gen_server and link that to this supervisor.
   {ok, _Pid} = supervisor:start_child(?MODULE, [Name, Path, Options]).
 
