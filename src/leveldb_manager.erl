@@ -276,6 +276,7 @@ state_set_handle(Name, Handle) -> ets:insert(Name, {handle, Handle}), Name.
 state_set_path(Name, Path) -> ets:insert(Name, {path, Path}), Name.
 
 state_add_reader(Name, Reader) -> ets:insert(Name, Reader), Name.
+
 state_try_remove_reader(Name, RPid) ->
   case ets:lookup(Name, RPid) of
     [{RPid, MonRef}] ->
@@ -284,6 +285,7 @@ state_try_remove_reader(Name, RPid) ->
     [] ->
       false
   end.
+
 state_has_readers(Name) ->
   ets:info(Name, size) > ?nr_static_keys.
 
