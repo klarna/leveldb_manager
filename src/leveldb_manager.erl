@@ -141,7 +141,7 @@ iterator_close({Mgr, IRef}) ->
 
 destroy(Path, Opts) ->
   %% this wrapper is only needed to cover the entire eleveldb API used
-  %% from klarna_leveldb; there's no need to modify eleveldb semantics
+  %% from mnesia_eleveldb; there's no need to modify eleveldb semantics
   %% for destroy
   eleveldb:destroy(Path, Opts).
 
