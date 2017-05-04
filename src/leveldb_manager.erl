@@ -410,14 +410,8 @@ do_read_lock(RFrom = {RPid, _Unique}, State, PidToKey) ->
 handle_read_unlock({RPid, _Unique}, State0) ->
   do_read_unlock(state_try_remove_reader(State0, RPid), RPid, State0).
 
-handle_read_unlock_iterator({RPid, Unique}, State0) ->
-  case state_try_remove_reader(State0, ?iterator(RPid)) of
-    false ->
-      %% TODO: upgrade compat, remove after GBL-31741 is live
-      handle_read_unlock({RPid, Unique}, State0);
-    Result ->
-      do_read_unlock(Result, RPid, State0)
-  end.
+handle_read_unlock_iterator({RPid, _Unique}, State) ->
+  do_read_unlock(state_try_remove_reader(State, ?iterator(RPid)), RPid, State).
 
 do_read_unlock(RemoveResult, RPid, State0) ->
   case RemoveResult of
