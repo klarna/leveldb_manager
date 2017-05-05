@@ -53,9 +53,11 @@
 %%% Leveldb API wrappers ensure that each leveldb op goes through a
 %%% proper "lock", "op", "unlock" sequence.
 %%%
-%%% A process is monitored while holding a lock.  If it terminates before
-%%% unlocking, the VM generates a {'DOWN', ...} message which is used to
-%%% force-unlock that process' lock.
+%%% A process is monitored while holding an exclusive lock.  If it
+%%% terminates before unlocking, the {'DOWN', ...} message is used to
+%%% force-unlock that process' lock.  A process holding a shared lock
+%%% is not monitored; instead, a processs wanting an exclusive lock
+%%% will check the Pids of shared lock holders, and reap the dead ones.
 %%%----------------------------------------------------------------
 
 -module(leveldb_manager).
@@ -279,7 +281,7 @@ state_set_writer(Name, Writer) -> ets:insert(Name, {writer, Writer}), Name.
 state_set_handle(Name, Handle) -> ets:insert(Name, {handle, Handle}), Name.
 state_set_path(Name, Path) -> ets:insert(Name, {path, Path}), Name.
 
-%% Pids with read locks are recorded as {Key, MonRef} tuples in the ETS table.
+%% Pids with read locks are recorded as {Key} tuples in the ETS table.
 %% For single-operation accesses (get/put/etc but not iterators), Key = Pid.
 %% For iterators, Key = {iterator, Pid}.
 
@@ -289,7 +291,7 @@ pid_to_reader_key(Pid) -> Pid.
 pid_to_iterator_key(Pid) -> ?iterator(Pid).
 
 state_get_readers(Name, PidToKey) ->
-  ets:select(Name, [{ _MatchHead = {PidToKey('$1'), '$2'}
+  ets:select(Name, [{ _MatchHead = {PidToKey('$1')}
                     , _Guards    = [{is_pid, '$1'}]
                     , _Result    = ['$_']
                     }]).
@@ -297,13 +299,15 @@ state_get_readers(Name, PidToKey) ->
 state_get_readers(Name) -> state_get_readers(Name, fun pid_to_reader_key/1).
 state_get_iterators(Name) -> state_get_readers(Name, fun pid_to_iterator_key/1).
 
-state_add_reader(Name, Key, MonRef) -> ets:insert(Name, {Key, MonRef}), Name.
+state_add_reader(Name, Key) -> ets:insert(Name, {Key}), Name.
+
+state_remove_reader(Name, Key) -> ets:delete(Name, Key), Name.
 
 state_try_remove_reader(Name, Key) ->
   case ets:lookup(Name, Key) of
-    [{Key, MonRef}] ->
+    [{Key}] ->
       ets:delete(Name, Key),
-      {ok, MonRef, Name};
+      {ok, Name};
     [] ->
       false
   end.
@@ -324,7 +328,7 @@ init([StateIsOld, State0, Path, Options]) ->
   {ok, State}.
 
 restart(State) ->
-  repair_readers(repair_writer(State)).
+  repair_writer(State).
 
 repair_writer(State) ->
   case state_get_writer(State) of
@@ -334,18 +338,7 @@ repair_writer(State) ->
       state_set_writer(State, remonitor(PidAndMonRef))
   end.
 
-repair_readers(State) ->
-  lists:foldl(fun repair_reader/2, State,
-              state_get_iterators(State) ++ state_get_readers(State)).
-
-repair_reader(Reader, State) ->
-  {Key, MonRef} = remonitor(Reader),
-  state_add_reader(State, Key, MonRef).
-
-remonitor({?iterator(Pid), _MonRef}) -> remonitor(?iterator(Pid), Pid);
-remonitor({Pid, _MonRef}) -> remonitor(Pid, Pid).
-
-remonitor(Key, Pid) -> {Key, erlang:monitor(process, Pid)}.
+remonitor({Pid, _MonRef}) -> {Pid, erlang:monitor(process, Pid)}.
 
 handle_call(Req, From, State) ->
   case Req of
@@ -401,9 +394,8 @@ handle_read_lock_iterator(RFrom, State) ->
 do_read_lock(RFrom = {RPid, _Unique}, State, PidToKey) ->
   case state_get_writer(State) of
     [] -> % no active or pending writer: take it
-      MonRef = erlang:monitor(process, RPid),
       Handle = state_get_handle(State),
-      {reply, Handle, state_add_reader(State, PidToKey(RPid), MonRef)};
+      {reply, Handle, state_add_reader(State, PidToKey(RPid))};
     _ -> % an active or pending writer: wait for it to leave
       Pending = [RFrom | state_get_pending(State)],
       {noreply, state_set_pending(State, Pending)}
@@ -417,18 +409,14 @@ handle_read_unlock_iterator({RPid, _Unique}, State) ->
 
 do_read_unlock(RemoveResult, RPid, State0) ->
   case RemoveResult of
-    {ok, MonRef, State1} ->
-      {reply, ok, do_read_unlock(MonRef, State1)};
+    {ok, State1} ->
+      {reply, ok, State1};
     false ->
       error_logger:error_msg(
         "Leveldb read-unlock without holding read lock: ~p",
         [RPid]),
       {reply, {error, nolock}, State0}
   end.
-
-do_read_unlock(MonRef, State) ->
-  erlang:demonitor(MonRef, [flush]),
-  State.
 
 handle_write_lock(WFrom = {WPid, _Unique}, State0) ->
   case state_get_writer(State0) of
@@ -449,7 +437,8 @@ handle_write_lock(WFrom = {WPid, _Unique}, State0) ->
 schedule_reaper() ->
   erlang:send_after(timer:seconds(1), self(), reaper).
 
-handle_reaper(State1) ->
+handle_reaper(State0) ->
+  State1 = reaper(State0),
   NewState =
     case state_get_writer(State1) of
       {WFrom, _MonRef} -> % pending writer (it didn't die while waiting)
@@ -467,6 +456,25 @@ handle_reaper(State1) ->
         State1
     end,
   {noreply, NewState}.
+
+reaper(State) ->
+  lists:foldl(fun reap_iterator/2,
+              lists:foldl(fun reap_reader/2,
+                          State,
+                          state_get_readers(State)),
+              state_get_iterators(State)).
+
+reap_reader({Pid}, State) -> reap_reader(Pid, Pid, State).
+
+reap_iterator({Key = ?iterator(Pid)}, State) -> reap_reader(Pid, Key, State).
+
+reap_reader(Pid, Key, State) ->
+  case is_process_alive(Pid) of
+    true ->
+      State;
+    false ->
+      state_remove_reader(State, Key)
+  end.
 
 handle_write_unlock({WPid, _Unique}, State) ->
   case state_get_writer(State) of
@@ -511,15 +519,9 @@ handle_down(Pid, State0) ->
       {{Pid, _Unique}, MonRef} ->
         do_write_unlock(MonRef, State0);
       _ ->
-        down_reader(Pid, down_reader(?iterator(Pid), State0))
+        State0
     end,
   {noreply, NewState}.
-
-down_reader(Key, State) ->
-  case state_try_remove_reader(State, Key) of
-    {ok, MonRef, State1} -> do_read_unlock(MonRef, State1);
-    false -> State
-  end.
 
 %%%----------------------------------------------------------------
 
