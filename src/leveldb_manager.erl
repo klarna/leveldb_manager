@@ -3,7 +3,7 @@
 %%% Author      : Mikael Pettersson <mikael.pettersson@klarna.com>
 %%% Description : Allows leveldb instances to be temporary offlined
 %%%
-%%% Copyright (c) 2014-2016 Klarna AB
+%%% Copyright (c) 2014-2017 Klarna AB
 %%%
 %%% This file is provided to you under the Apache License,
 %%% Version 2.0 (the "License"); you may not use this file
@@ -378,6 +378,8 @@ handle_info(Info, State) ->
   case Info of
     {'DOWN', _MonRef, process, Pid, _Info2} ->
       handle_down(Pid, State);
+    reaper ->
+      handle_reaper(State);
     _ ->
       {noreply, State}
   end.
@@ -424,22 +426,9 @@ do_read_unlock(RemoveResult, RPid, State0) ->
       {reply, {error, nolock}, State0}
   end.
 
-do_read_unlock(MonRef, State0) ->
+do_read_unlock(MonRef, State) ->
   erlang:demonitor(MonRef, [flush]),
-  case state_has_readers(State0) of
-    false -> % no active readers: check for pending writer
-      case state_get_writer(State0) of
-        {WFrom, _MonRef} -> % pending writer: wake it
-          %% take the write lock, then wake the writer
-          State1 = leveldb_offline(State0),
-          gen_server:reply(WFrom, ok),
-          State1;
-        [] -> % no pending writer: nothing to do
-          State0
-      end;
-    true -> % more active readers: nothing to do
-      State0
-  end.
+  State.
 
 handle_write_lock(WFrom = {WPid, _Unique}, State0) ->
   case state_get_writer(State0) of
@@ -450,11 +439,34 @@ handle_write_lock(WFrom = {WPid, _Unique}, State0) ->
         false -> % no active readers: take it
           {reply, ok, leveldb_offline(State1)};
         true ->  % more active readers: wait for them to leave
+          schedule_reaper(),
           {noreply, State1}
       end;
     _ -> % an active or pending writer: fail
       {reply, {error, busy}, State0}
   end.
+
+schedule_reaper() ->
+  erlang:send_after(timer:seconds(1), self(), reaper).
+
+handle_reaper(State1) ->
+  NewState =
+    case state_get_writer(State1) of
+      {WFrom, _MonRef} -> % pending writer (it didn't die while waiting)
+        case state_has_readers(State1) of
+          false -> % no active readers: wake the writer
+            %% take the write lock, then wake the writer
+            State2 = leveldb_offline(State1),
+            gen_server:reply(WFrom, ok),
+            State2;
+          true -> % more active readers: reschedule
+            schedule_reaper(),
+            State1
+        end;
+      [] -> % no pending writer: nothing to do
+        State1
+    end,
+  {noreply, NewState}.
 
 handle_write_unlock({WPid, _Unique}, State) ->
   case state_get_writer(State) of
