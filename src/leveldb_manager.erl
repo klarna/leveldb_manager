@@ -371,8 +371,8 @@ handle_info(Info, State) ->
   case Info of
     {'DOWN', _MonRef, process, Pid, _Info2} ->
       handle_down(Pid, State);
-    reaper ->
-      handle_reaper(State);
+    {reaper, MonRef} ->
+      handle_reaper(MonRef, State);
     _ ->
       {noreply, State}
   end.
@@ -427,21 +427,21 @@ handle_write_lock(WFrom = {WPid, _Unique}, State0) ->
         false -> % no active readers: take it
           {reply, ok, leveldb_offline(State1)};
         true ->  % more active readers: wait for them to leave
-          schedule_reaper(),
+          schedule_reaper(MonRef),
           {noreply, State1}
       end;
     _ -> % an active or pending writer: fail
       {reply, {error, busy}, State0}
   end.
 
-schedule_reaper() ->
-  erlang:send_after(timer:seconds(1), self(), reaper).
+schedule_reaper(MonRef) ->
+  erlang:send_after(timer:seconds(1), self(), {reaper, MonRef}).
 
-handle_reaper(State0) ->
+handle_reaper(MonRef, State0) ->
   State1 = reaper(State0),
   NewState =
     case state_get_writer(State1) of
-      {WFrom, _MonRef} -> % pending writer (it didn't die while waiting)
+      {WFrom, MonRef} -> % pending writer (it didn't die while waiting)
         case state_has_readers(State1) of
           false -> % no active readers: wake the writer
             %% take the write lock, then wake the writer
@@ -449,10 +449,10 @@ handle_reaper(State0) ->
             gen_server:reply(WFrom, ok),
             State2;
           true -> % more active readers: reschedule
-            schedule_reaper(),
+            schedule_reaper(MonRef),
             State1
         end;
-      [] -> % no pending writer: nothing to do
+      _ -> % writer no longer pending: nothing to do
         State1
     end,
   {noreply, NewState}.
