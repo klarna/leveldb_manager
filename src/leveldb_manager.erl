@@ -334,11 +334,11 @@ repair_writer(State) ->
   case state_get_writer(State) of
     [] ->
       State;
-    PidAndMonRef ->
-      state_set_writer(State, remonitor(PidAndMonRef))
+    {WFrom = {WPid, _Unique}, _MonRef} ->
+      MonRef = erlang:monitor(process, WPid),
+      Writer = {WFrom, MonRef},
+      state_set_writer(State, Writer)
   end.
-
-remonitor({Pid, _MonRef}) -> {Pid, erlang:monitor(process, Pid)}.
 
 handle_call(Req, From, State) ->
   case Req of
