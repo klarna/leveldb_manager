@@ -166,6 +166,12 @@ start_link(Name, Path, Options) ->
   gen_server:start_link({local, Name}, ?MODULE,
                         [StateIsOld, Name, Path, Options], []).
 
+%% Pids with read locks are recorded as {Key} tuples in the ETS table.
+%% For single-operation accesses (get/put/etc but not iterators), Key = Pid.
+%% For iterators, Key = {iterator, Pid}.
+
+-define(iterator(Pid), {iterator, Pid}).
+
 get_handle(Mgr) ->
   case robust_call(Mgr, read_lock) of
     false -> get_handle(Mgr); % see do_write_unlock/2
@@ -173,7 +179,11 @@ get_handle(Mgr) ->
   end.
 
 put_handle(Mgr) ->
-  robust_call(Mgr, read_unlock).
+  put_handle(Mgr, self()).
+
+put_handle(Mgr, Key) ->
+  Ets = Mgr,
+  ets:delete(Ets, Key).
 
 get_iterator(Mgr) ->
   case robust_call(Mgr, read_lock_iterator) of
@@ -182,7 +192,7 @@ get_iterator(Mgr) ->
   end.
 
 put_iterator(Mgr) ->
-  robust_call(Mgr, read_unlock_iterator).
+  put_handle(Mgr, ?iterator(self())).
 
 suspend_before_snapshot(Mgr) ->
   robust_call(Mgr, write_lock).
@@ -281,12 +291,6 @@ state_set_writer(Name, Writer) -> ets:insert(Name, {writer, Writer}), Name.
 state_set_handle(Name, Handle) -> ets:insert(Name, {handle, Handle}), Name.
 state_set_path(Name, Path) -> ets:insert(Name, {path, Path}), Name.
 
-%% Pids with read locks are recorded as {Key} tuples in the ETS table.
-%% For single-operation accesses (get/put/etc but not iterators), Key = Pid.
-%% For iterators, Key = {iterator, Pid}.
-
--define(iterator(Pid), {iterator, Pid}).
-
 pid_to_reader_key(Pid) -> Pid.
 pid_to_iterator_key(Pid) -> ?iterator(Pid).
 
@@ -344,11 +348,11 @@ handle_call(Req, From, State) ->
   case Req of
     read_lock ->
       handle_read_lock(From, State);
-    read_unlock ->
+    read_unlock -> % TODO: remove after upgrade
       handle_read_unlock(From, State);
     read_lock_iterator ->
       handle_read_lock_iterator(From, State);
-    read_unlock_iterator ->
+    read_unlock_iterator -> % TODO: remove after upgrade
       handle_read_unlock_iterator(From, State);
     write_lock ->
       handle_write_lock(From, State);
