@@ -58,6 +58,18 @@
 %%% force-unlock that process' lock.  A process holding a shared lock
 %%% is not monitored; instead, a processs wanting an exclusive lock
 %%% will check the Pids of shared lock holders, and reap the dead ones.
+%%%
+%%% A shared lock is taken entirely outside of the manager's gen_server,
+%%% as long as the lock is not contended.  The fast path adds the
+%%% requesting process' Key (Pid or {iterator, Pid}) to the manager's ETS
+%%% table, and then reads the Handle and Writer from it.  If the Writer
+%%% is absent, the lock is granted.  Otherwise the slow path is invoked
+%%% via a call to the gen_server.  The slow path removes the Key and
+%%% delays replying until the exclusive lock is no longer held, at which
+%%% point the process tries again.
+%%%
+%%% Releasing a held shared lock is always done outside of the gen_server,
+%%% by erasing the lock holder's Key from the ETS table.
 %%%----------------------------------------------------------------
 
 -module(leveldb_manager).
@@ -173,9 +185,22 @@ start_link(Name, Path, Options) ->
 -define(iterator(Pid), {iterator, Pid}).
 
 get_handle(Mgr) ->
-  case robust_call(Mgr, read_lock) of
-    false -> get_handle(Mgr); % see do_write_unlock/2
-    Handle -> Handle
+  get_handle(Mgr, self(), read_lock).
+
+get_handle(Mgr, Key, SlowPathReq) ->
+  %% try fast-path
+  Ets = Mgr,
+  ets:insert(Ets, {Key}),
+  %% order matters here: reading the Writer must be last
+  Handle = ets:lookup_element(Ets, handle, 2),
+  case ets:lookup_element(Ets, writer, 2) of
+    [] -> % no active or pending writer: got it
+      Handle;
+    _ -> % an active or pending writer: fall back to slow-path
+      case robust_call(Mgr, SlowPathReq) of
+        false -> get_handle(Mgr, Key, SlowPathReq); % see do_write_unlock/2
+        Handle -> Handle
+      end
   end.
 
 put_handle(Mgr) ->
@@ -186,10 +211,7 @@ put_handle(Mgr, Key) ->
   ets:delete(Ets, Key).
 
 get_iterator(Mgr) ->
-  case robust_call(Mgr, read_lock_iterator) of
-    false -> get_iterator(Mgr); % see do_write_unlock/2
-    Handle -> Handle
-  end.
+  get_handle(Mgr, ?iterator(self()), read_lock_iterator).
 
 put_iterator(Mgr) ->
   put_handle(Mgr, ?iterator(self())).
@@ -395,11 +417,15 @@ handle_read_lock(RFrom, State) ->
 handle_read_lock_iterator(RFrom, State) ->
   do_read_lock(RFrom, State, fun pid_to_iterator_key/1).
 
-do_read_lock(RFrom = {RPid, _Unique}, State, PidToKey) ->
+do_read_lock(RFrom = {RPid, _Unique}, State0, PidToKey) ->
+  Key = PidToKey(RPid),
+  %% first undo the failed fast-path attempt
+  State = state_remove_reader(State0, Key),
+  %% then do the slow-path
   case state_get_writer(State) of
     [] -> % no active or pending writer: take it
       Handle = state_get_handle(State),
-      {reply, Handle, state_add_reader(State, PidToKey(RPid))};
+      {reply, Handle, state_add_reader(State, Key)};
     _ -> % an active or pending writer: wait for it to leave
       Pending = [RFrom | state_get_pending(State)],
       {noreply, state_set_pending(State, Pending)}
@@ -502,7 +528,7 @@ do_write_unlock(MonRef, State0) ->
       %% we could wake each pending reader with an already-held
       %% read lock, but that would complicate the code and isn't
       %% strictly necessary: just have the readers re-try their
-      %% read-lock paths; see get_handle/1
+      %% read-lock paths; see get_handle/3
       lists:foreach(fun (RFrom) -> gen_server:reply(RFrom, false) end,
                     Pending),
       state_set_pending(State2, [])
