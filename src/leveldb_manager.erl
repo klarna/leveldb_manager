@@ -70,6 +70,24 @@
 %%%
 %%% Releasing a held shared lock is always done outside of the gen_server,
 %%% by erasing the lock holder's Key from the ETS table.
+%%%
+%%% This is a variant of Dekker's algorithm for mutual exclusion.  The
+%%% main differences are:
+%%%
+%%% 1. Instead of implementing mutual exclusion between two processes, it
+%%%    implements mutual exclusion between one writer and a group of readers.
+%%%    Each reader has its own "intent" variable (its Pid's presence in the
+%%%    ETS table), and the writer derives the combined intent of all readers
+%%%    from the size of the ETS table.
+%%%
+%%% 2. There is no "turn" variable, instead the writer has precendence, and
+%%%    new readers back off in case of contention.  This does not affect
+%%%    safety, only liveness, and liveness follows from the fact that writers
+%%%    are extremely infrequent.
+%%%
+%%% 3. Blocked readers do not spin-loop, instead they back off and wait on
+%%%    a condition variable.  When the writer releases the lock it signals
+%%%    that condition variable, allowing the readers to try again.
 %%%----------------------------------------------------------------
 
 -module(leveldb_manager).
