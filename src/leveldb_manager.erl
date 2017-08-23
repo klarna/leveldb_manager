@@ -187,7 +187,9 @@ start(Name, Path, Options) ->
   {ok, Name}.
 
 default_options() ->
-  [{create_if_missing, true}].
+  [ {create_if_missing, true}
+  , {use_bloomfilter, true}
+  ].
 
 start_link(Name, Path, Options) ->
   %% Note: this function executes in the context of the supervisor,
