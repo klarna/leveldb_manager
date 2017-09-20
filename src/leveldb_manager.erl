@@ -347,15 +347,6 @@ state_add_reader(Name, Key) -> ets:insert(Name, {Key}), Name.
 
 state_remove_reader(Name, Key) -> ets:delete(Name, Key), Name.
 
-state_try_remove_reader(Name, Key) ->
-  case ets:lookup(Name, Key) of
-    [{Key}] ->
-      ets:delete(Name, Key),
-      {ok, Name};
-    [] ->
-      false
-  end.
-
 state_has_readers(Name) ->
   ets:info(Name, size) > ?nr_static_keys.
 
@@ -388,12 +379,8 @@ handle_call(Req, From, State) ->
   case Req of
     read_lock ->
       handle_read_lock(From, State);
-    read_unlock -> % TODO: remove after upgrade
-      handle_read_unlock(From, State);
     read_lock_iterator ->
       handle_read_lock_iterator(From, State);
-    read_unlock_iterator -> % TODO: remove after upgrade
-      handle_read_unlock_iterator(From, State);
     write_lock ->
       handle_write_lock(From, State);
     write_unlock ->
@@ -447,23 +434,6 @@ do_read_lock(RFrom = {RPid, _Unique}, State0, PidToKey) ->
     _ -> % an active or pending writer: wait for it to leave
       Pending = [RFrom | state_get_pending(State)],
       {noreply, state_set_pending(State, Pending)}
-  end.
-
-handle_read_unlock({RPid, _Unique}, State0) ->
-  do_read_unlock(state_try_remove_reader(State0, RPid), RPid, State0).
-
-handle_read_unlock_iterator({RPid, _Unique}, State) ->
-  do_read_unlock(state_try_remove_reader(State, ?iterator(RPid)), RPid, State).
-
-do_read_unlock(RemoveResult, RPid, State0) ->
-  case RemoveResult of
-    {ok, State1} ->
-      {reply, ok, State1};
-    false ->
-      error_logger:error_msg(
-        "Leveldb read-unlock without holding read lock: ~p",
-        [RPid]),
-      {reply, {error, nolock}, State0}
   end.
 
 handle_write_lock(WFrom = {WPid, _Unique}, State0) ->
