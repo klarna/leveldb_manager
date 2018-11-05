@@ -3,7 +3,7 @@
 %%% Author      : Mikael Pettersson <mikael.pettersson@klarna.com>
 %%% Description : Allows leveldb instances to be temporary offlined
 %%%
-%%% Copyright (c) 2014-2017 Klarna AB
+%%% Copyright (c) 2014-2018 Klarna Bank AB
 %%%
 %%% This file is provided to you under the Apache License,
 %%% Version 2.0 (the "License"); you may not use this file
@@ -410,6 +410,7 @@ handle_info(Info, State) ->
       {noreply, State}
   end.
 
+terminate(_Reason, _State = []) -> ok;
 terminate(_Reason, State) ->
   state_delete(leveldb_offline(State)).
 
@@ -531,7 +532,9 @@ handle_set_path(State, Path) ->
   {reply, ok, state_set_path(State, Path)}.
 
 handle_stop(State) ->
-  {stop, normal, ok, State}.
+  state_delete(leveldb_offline(State)),
+  unregister(_Name = State),
+  {stop, normal, ok, []}.
 
 handle_down(Pid, State0) ->
   NewState =
