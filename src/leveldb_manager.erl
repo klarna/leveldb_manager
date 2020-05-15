@@ -3,7 +3,7 @@
 %%% Author      : Mikael Pettersson <mikael.pettersson@klarna.com>
 %%% Description : Allows leveldb instances to be temporary offlined
 %%%
-%%% Copyright (c) 2014-2018 Klarna Bank AB
+%%% Copyright (c) 2014-2020 Klarna Bank AB
 %%%
 %%% This file is provided to you under the Apache License,
 %%% Version 2.0 (the "License"); you may not use this file
@@ -219,7 +219,7 @@ get_handle(Mgr, Key, SlowPathReq) ->
     _ -> % an active or pending writer: fall back to slow-path
       case robust_call(Mgr, SlowPathReq) of
         false -> get_handle(Mgr, Key, SlowPathReq); % see do_write_unlock/2
-        Handle -> Handle
+        NewHandle -> NewHandle
       end
   end.
 
